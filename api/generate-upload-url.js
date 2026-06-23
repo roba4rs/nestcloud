@@ -1,4 +1,4 @@
-const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -15,6 +15,8 @@ const r2 = new S3Client({
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
   },
 });
+
+const MULTIPART_THRESHOLD = 100 * 1024 * 1024; // 100MB
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
@@ -38,42 +40,53 @@ module.exports = async function handler(req, res) {
 
     const userId = userData.user.id;
 
-    const { fileId, r2Key } = req.body || {};
+    const { fileName, mimeType, size, folderId } = req.body || {};
 
-    if (!fileId || !r2Key) {
-      return res.status(400).json({ error: "fileId and r2Key are required" });
+    if (!fileName || !size) {
+      return res.status(400).json({ error: "fileName and size are required" });
     }
 
-    // 2. Verify user owns the file (query Supabase files table)
-    const { data: fileRow, error: fileError } = await supabase
-      .from("files")
-      .select("id, user_id, r2_key")
-      .eq("id", fileId)
+    // 2. Re-check storage_limit vs used_bytes server-side (not authoritative on frontend)
+    const { data: storageRow, error: storageError } = await supabase
+      .from("user_storage")
+      .select("used_bytes, storage_limit, plan_active")
+      .eq("user_id", userId)
       .single();
 
-    if (fileError || !fileRow) {
-      return res.status(404).json({ error: "File not found" });
+    if (storageError || !storageRow) {
+      return res.status(500).json({ error: "Could not load storage record" });
     }
 
-    if (fileRow.user_id !== userId) {
-      return res.status(403).json({ error: "You do not own this file" });
+    if (!storageRow.plan_active) {
+      return res.status(403).json({ error: "Plan inactive — uploads disabled" });
     }
 
-    if (fileRow.r2_key !== r2Key) {
-      return res.status(400).json({ error: "r2Key does not match file record" });
+    if (storageRow.used_bytes + size > storageRow.storage_limit) {
+      return res.status(403).json({ error: "Storage limit exceeded" });
     }
 
-    // 3. Return presigned GET URL (expires in 1 hour)
-    const command = new GetObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME,
-      Key: fileRow.r2_key,
+    // 3. Generate a unique r2Key
+    const r2Key = `${userId}/${Date.now()}-${fileName}`;
+
+    // 4. Files under 100MB: single presigned PUT URL
+    if (size < MULTIPART_THRESHOLD) {
+      const command = new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: r2Key,
+        ContentType: mimeType || "application/octet-stream",
+      });
+
+      const url = await getSignedUrl(r2, command, { expiresIn: 3600 });
+
+      return res.status(200).json({ url, r2Key });
+    }
+
+    // 5. Files 100MB+: multipart upload initiation — NOT YET IMPLEMENTED (step 6)
+    return res.status(501).json({
+      error: "Multipart upload not yet implemented for files 100MB+",
     });
-
-    const url = await getSignedUrl(r2, command, { expiresIn: 3600 });
-
-    return res.status(200).json({ url });
   } catch (err) {
-    console.error("generate-download-url error:", err);
+    console.error("generate-upload-url error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 };
