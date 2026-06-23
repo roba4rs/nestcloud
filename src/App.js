@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
 import AuthPage from './pages/AuthPage';
+import DrivePage from './pages/DrivePage';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -31,14 +32,6 @@ function FullPageSpinner() {
         <circle cx="12" cy="12" r="10" stroke="#222" strokeWidth="2.5" />
         <path d="M12 2a10 10 0 0 1 10 10" stroke="var(--brand)" strokeWidth="2.5" strokeLinecap="round" />
       </svg>
-    </div>
-  );
-}
-
-function DrivePage() {
-  return (
-    <div style={{ padding: 24, color: 'var(--text-primary)' }}>
-      Drive coming soon…
     </div>
   );
 }
