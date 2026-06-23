@@ -48,7 +48,7 @@ function LogOutIcon({ size = 15, color = 'currentColor' }) {
 
 // ── TopBar ────────────────────────────────────────────────────────────────────
 
-export default function TopBar({ user, view = 'list', onViewChange, onSearch }) {
+export default function TopBar({ user, view = 'list', onViewChange, onSearch, isMobile = false, onOpenMeMenu }) {
   const [query, setQuery] = useState('');
   const [avatarError, setAvatarError] = useState(false);
 
@@ -59,10 +59,6 @@ export default function TopBar({ user, view = 'list', onViewChange, onSearch }) 
     const val = e.target.value;
     setQuery(val);
     onSearch?.(val);
-  }
-
-  async function handleSignOut() {
-    await supabase.auth.signOut();
   }
 
   return (
@@ -152,7 +148,10 @@ export default function TopBar({ user, view = 'list', onViewChange, onSearch }) 
       </div>
 
       {/* Avatar */}
-      <div style={{ position: 'relative' }}>
+      <div
+        onClick={isMobile ? onOpenMeMenu : undefined}
+        style={{ position: 'relative', cursor: isMobile ? 'pointer' : 'default' }}
+      >
         {avatarUrl && !avatarError ? (
           <img
             src={avatarUrl}
@@ -185,36 +184,38 @@ export default function TopBar({ user, view = 'list', onViewChange, onSearch }) 
         )}
       </div>
 
-      {/* Sign out */}
-      <button
-        onClick={handleSignOut}
-        title="Sign out"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '7px 12px',
-          borderRadius: 8,
-          border: '1px solid var(--border)',
-          background: 'transparent',
-          color: 'var(--text-secondary)',
-          fontSize: 13,
-          fontFamily: 'var(--font-ui)',
-          cursor: 'pointer',
-          transition: 'border-color 0.15s, color 0.15s',
-        }}
-        onMouseEnter={e => {
-          e.currentTarget.style.borderColor = 'var(--danger)';
-          e.currentTarget.style.color = 'var(--danger)';
-        }}
-        onMouseLeave={e => {
-          e.currentTarget.style.borderColor = 'var(--border)';
-          e.currentTarget.style.color = 'var(--text-secondary)';
-        }}
-      >
-        <LogOutIcon size={15} />
-        Sign out
-      </button>
+      {/* Sign out — desktop only; on mobile this lives in the bottom nav's "Me" sheet */}
+      {!isMobile && (
+        <button
+          onClick={async () => { await supabase.auth.signOut(); }}
+          title="Sign out"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '7px 12px',
+            borderRadius: 8,
+            border: '1px solid var(--border)',
+            background: 'transparent',
+            color: 'var(--text-secondary)',
+            fontSize: 13,
+            fontFamily: 'var(--font-ui)',
+            cursor: 'pointer',
+            transition: 'border-color 0.15s, color 0.15s',
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.borderColor = 'var(--danger)';
+            e.currentTarget.style.color = 'var(--danger)';
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.borderColor = 'var(--border)';
+            e.currentTarget.style.color = 'var(--text-secondary)';
+          }}
+        >
+          <LogOutIcon size={15} />
+          Sign out
+        </button>
+      )}
 
     </header>
   );

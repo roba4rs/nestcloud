@@ -37,6 +37,7 @@ export default function DrivePage() {
   const [deleting, setDeleting] = useState(false);
   const [downloadingId, setDownloadingId] = useState(null);
   const [storageOverrideBytes, setStorageOverrideBytes] = useState(null); // optimistic local decrement after delete
+  const [meSheetOpen, setMeSheetOpen] = useState(false);
 
   // Fetch folders
   useEffect(() => {
@@ -224,6 +225,8 @@ export default function DrivePage() {
           view={view}
           onViewChange={setView}
           onSearch={setSearchQuery}
+          isMobile={isMobile}
+          onOpenMeMenu={() => setMeSheetOpen(true)}
         />
 
         {/* Main content */}
@@ -357,6 +360,7 @@ export default function DrivePage() {
                           onDownload={handleDownload}
                           onDelete={handleDeleteRequest}
                           isDownloading={downloadingId === file.id}
+                          isMobile={isMobile}
                         />
                       ))}
                     </div>
@@ -371,6 +375,7 @@ export default function DrivePage() {
                           onDownload={handleDownload}
                           onDelete={handleDeleteRequest}
                           isDownloading={downloadingId === file.id}
+                          isMobile={isMobile}
                         />
                       ))}
                     </div>
@@ -387,6 +392,9 @@ export default function DrivePage() {
         <BottomTabBar
           activeTab={showSearch ? 'search' : activeNav}
           onTabChange={handleTabChange}
+          user={user}
+          meSheetOpen={meSheetOpen}
+          onMeSheetOpenChange={setMeSheetOpen}
         />
       )}
 
@@ -458,9 +466,10 @@ function FolderCard({ folder, view, onClick }) {
 
 // ── FileRow ───────────────────────────────────────────────────────────────────
 
-function FileRow({ file, last, onDownload, onDelete, isDownloading }) {
+function FileRow({ file, last, onDownload, onDelete, isDownloading, isMobile }) {
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const showButton = isMobile || hovered || menuOpen;
 
   return (
     <div
@@ -494,7 +503,7 @@ function FileRow({ file, last, onDownload, onDelete, isDownloading }) {
           <div style={{ width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Spinner size={14} />
           </div>
-        ) : hovered && (
+        ) : showButton && (
           <button
             onClick={() => setMenuOpen(o => !o)}
             style={{
@@ -522,9 +531,10 @@ function FileRow({ file, last, onDownload, onDelete, isDownloading }) {
 
 // ── FileCard ──────────────────────────────────────────────────────────────────
 
-function FileCard({ file, onDownload, onDelete, isDownloading }) {
+function FileCard({ file, onDownload, onDelete, isDownloading, isMobile }) {
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const showButton = isMobile || hovered || menuOpen;
 
   return (
     <div
@@ -548,7 +558,7 @@ function FileCard({ file, onDownload, onDelete, isDownloading }) {
         <div style={{ position: 'absolute', top: 8, right: 8, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Spinner size={14} />
         </div>
-      ) : hovered && (
+      ) : showButton && (
         <button
           onClick={() => setMenuOpen(o => !o)}
           style={{
