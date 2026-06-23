@@ -8,6 +8,36 @@ import BottomTabBar from '../components/BottomTabBar';
 
 const UPLOAD_CONCURRENCY = 3;
 
+// Limits how many thumbnail (presigned URL) requests run at once. Without this,
+// a folder with many images fires one request per image simultaneously, which
+// is fine on fast wifi but causes intermittent failures on slower mobile
+// connections (relevant given R2's nearest edge to Ethiopia is Nairobi/Johannesburg).
+const THUMBNAIL_CONCURRENCY = 4;
+let activeThumbnailRequests = 0;
+const thumbnailQueue = [];
+
+function runThumbnailFetch(task) {
+  return new Promise((resolve, reject) => {
+    const run = async () => {
+      activeThumbnailRequests++;
+      try {
+        resolve(await task());
+      } catch (err) {
+        reject(err);
+      } finally {
+        activeThumbnailRequests--;
+        const next = thumbnailQueue.shift();
+        if (next) next();
+      }
+    };
+    if (activeThumbnailRequests < THUMBNAIL_CONCURRENCY) {
+      run();
+    } else {
+      thumbnailQueue.push(run);
+    }
+  });
+}
+
 // ── Mobile hook ───────────────────────────────────────────────────────────────
 
 function useIsMobile() {
@@ -820,26 +850,42 @@ function FileCard({ file, onDownload, onDelete, isDownloading, isMobile, getAuth
   const isImage = !!file.mime_type && file.mime_type.startsWith('image/');
   const showThumb = isImage && thumbUrl && !thumbError;
 
-  // Fetch a presigned preview URL for image files only. Falls back to the
-  // generic file icon silently if this fails (e.g. expired token, network blip).
+  // Fetch a presigned preview URL for image files only. Routed through a
+  // concurrency limiter (see THUMBNAIL_CONCURRENCY) so folders with lots of
+  // images don't fire dozens of simultaneous requests — that's what was
+  // causing thumbnails to load inconsistently on mobile connections.
   useEffect(() => {
     if (!isImage) return;
     let cancelled = false;
+
+    async function fetchThumb() {
+      const headers = await getAuthHeader();
+      const res = await fetch('/api/generate-download-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({ fileId: file.id, r2Key: file.r2_key }),
+      });
+      if (!res.ok) throw new Error('Failed to load preview');
+      const { url } = await res.json();
+      return url;
+    }
+
     (async () => {
       try {
-        const headers = await getAuthHeader();
-        const res = await fetch('/api/generate-download-url', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...headers },
-          body: JSON.stringify({ fileId: file.id, r2Key: file.r2_key }),
-        });
-        if (!res.ok) throw new Error('Failed to load preview');
-        const { url } = await res.json();
+        const url = await runThumbnailFetch(fetchThumb);
         if (!cancelled) setThumbUrl(url);
       } catch {
-        if (!cancelled) setThumbError(true);
+        // One retry — covers transient mobile network blips rather than
+        // permanently falling back to the generic icon on the first failure.
+        try {
+          const url = await runThumbnailFetch(fetchThumb);
+          if (!cancelled) setThumbUrl(url);
+        } catch {
+          if (!cancelled) setThumbError(true);
+        }
       }
     })();
+
     return () => { cancelled = true; };
   }, [file.id, file.r2_key, isImage, getAuthHeader]);
 
