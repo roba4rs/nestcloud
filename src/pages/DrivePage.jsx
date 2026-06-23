@@ -41,7 +41,15 @@ export default function DrivePage() {
   const [storageOverrideBytes, setStorageOverrideBytes] = useState(null); // optimistic local decrement after delete
   const [meSheetOpen, setMeSheetOpen] = useState(false);
   const [uploadQueue, setUploadQueue] = useState([]); // [{ id, file, status: 'queued'|'uploading'|'done'|'error', progress, error }]
+  const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [toasts, setToasts] = useState([]); // [{ id, message, type: 'success'|'error'|'info' }]
   const fileInputRef = useRef(null);
+
+  function showToast(message, type = 'info') {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  }
 
   // Fetch folders
   useEffect(() => {
@@ -122,15 +130,22 @@ export default function DrivePage() {
     setCurrentFolderId(null);
   }
 
-  async function handleNewFolder() {
-    const name = window.prompt('Folder name:');
-    if (!name || !name.trim()) return;
+  function handleNewFolder() {
+    setNewFolderOpen(true);
+  }
+
+  async function handleCreateFolder(name) {
     const { data, error } = await supabase.from('folders').insert({
       user_id: user.id,
       name: name.trim(),
       parent_id: currentFolderId || null,
     }).select().single();
-    if (!error && data) setFolders(prev => [...prev, data]);
+    if (error) {
+      showToast('Failed to create folder', 'error');
+    } else if (data) {
+      setFolders(prev => [...prev, data]);
+      showToast(`Folder "${name}" created`, 'success');
+    }
   }
 
   // ── File actions ─────────────────────────────────────────────────────────
@@ -162,7 +177,7 @@ export default function DrivePage() {
       document.body.removeChild(a);
     } catch (err) {
       console.error('Download failed:', err);
-      window.alert('Could not download this file. Please try again.');
+      showToast('Could not download this file. Please try again.', 'error');
     } finally {
       setDownloadingId(null);
     }
@@ -193,9 +208,10 @@ export default function DrivePage() {
         return Math.max(0, base - (file.size || 0));
       });
       setDeleteTarget(null);
+      showToast(`"${file.name}" deleted`, 'success');
     } catch (err) {
       console.error('Delete failed:', err);
-      window.alert('Could not delete this file. Please try again.');
+      showToast('Could not delete this file. Please try again.', 'error');
     } finally {
       setDeleting(false);
     }
@@ -221,10 +237,7 @@ export default function DrivePage() {
     // network call. The server re-checks the real, authoritative used_bytes
     // before issuing a presigned URL — this is just a fast UX shortcut.
     if (incomingTotal > remaining) {
-      window.alert(
-        `Not enough storage space. You have ${formatBytes(remaining)} left, ` +
-        `but these files total ${formatBytes(incomingTotal)}.`
-      );
+      showToast(`Not enough space. ${formatBytes(remaining)} left, files total ${formatBytes(incomingTotal)}.`, 'error');
       return;
     }
 
@@ -401,6 +414,14 @@ export default function DrivePage() {
                 boxSizing: 'border-box',
               }}
             />
+          )}
+
+          {/* Trash header */}
+          {activeNav === 'trash' && (
+            <div style={{ marginBottom: 16 }}>
+              <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Trash</p>
+              <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '4px 0 0' }}>Files deleted from NestCloud appear here</p>
+            </div>
           )}
 
           {/* Toolbar row — breadcrumb (drive only) + view toggle + upload */}
@@ -606,6 +627,20 @@ export default function DrivePage() {
         />
       )}
 
+      {/* New folder modal */}
+      {newFolderOpen && (
+        <NewFolderModal
+          onCancel={() => setNewFolderOpen(false)}
+          onCreate={async (name) => {
+            setNewFolderOpen(false);
+            await handleCreateFolder(name);
+          }}
+        />
+      )}
+
+      {/* Toast notifications */}
+      <ToastContainer toasts={toasts} onDismiss={(id) => setToasts(prev => prev.filter(t => t.id !== id))} isMobile={isMobile} />
+
       {/* Hidden file input — shared by desktop Upload button and mobile "+" button */}
       <input
         ref={fileInputRef}
@@ -635,7 +670,7 @@ export default function DrivePage() {
             justifyContent: 'center',
             boxShadow: '0 6px 20px rgba(79, 70, 229, 0.45)',
             cursor: 'pointer',
-            zIndex: 90,
+            zIndex: 110,
           }}
         >
           <PlusIconLarge size={24} />
@@ -1059,6 +1094,175 @@ function UploadProgressPanel({ queue, onDismiss, onClearDone, isMobile }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── NewFolderModal ────────────────────────────────────────────────────────────
+
+function NewFolderModal({ onCancel, onCreate }) {
+  const [name, setName] = useState('');
+  const [creating, setCreating] = useState(false);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }, []);
+
+  async function handleSubmit() {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setCreating(true);
+    await onCreate(trimmed);
+    setCreating(false);
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter') handleSubmit();
+    if (e.key === 'Escape') onCancel();
+  }
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'fixed', inset: 0,
+        background: 'rgba(0,0,0,0.4)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 200,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 360,
+          maxWidth: 'calc(100vw - 32px)',
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          borderRadius: 12,
+          padding: 20,
+          boxShadow: '0 16px 40px rgba(0,0,0,0.15)',
+        }}
+      >
+        <p style={{ margin: '0 0 14px', fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
+          New folder
+        </p>
+        <input
+          ref={inputRef}
+          type="text"
+          placeholder="Folder name"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={handleKeyDown}
+          maxLength={255}
+          style={{
+            width: '100%',
+            height: 38,
+            padding: '0 12px',
+            borderRadius: 8,
+            border: '1px solid var(--border)',
+            background: 'var(--bg-input)',
+            color: 'var(--text-primary)',
+            fontSize: 14,
+            fontFamily: 'var(--font-ui)',
+            outline: 'none',
+            boxSizing: 'border-box',
+            transition: 'border-color 0.15s',
+          }}
+          onFocus={e => e.target.style.borderColor = 'var(--border-focus)'}
+          onBlur={e => e.target.style.borderColor = 'var(--border)'}
+        />
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <button
+            onClick={onCancel}
+            disabled={creating}
+            style={{
+              padding: '8px 16px', borderRadius: 8,
+              border: '1px solid var(--border)', background: 'transparent',
+              color: 'var(--text-primary)', fontSize: 13,
+              fontFamily: 'var(--font-ui)', cursor: 'pointer',
+              opacity: creating ? 0.5 : 1,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={creating || !name.trim()}
+            style={{
+              padding: '8px 16px', borderRadius: 8, border: 'none',
+              background: 'var(--brand)', color: '#fff',
+              fontSize: 13, fontWeight: 600,
+              fontFamily: 'var(--font-ui)', cursor: creating || !name.trim() ? 'default' : 'pointer',
+              opacity: creating || !name.trim() ? 0.6 : 1,
+              display: 'flex', alignItems: 'center', gap: 6,
+            }}
+          >
+            {creating && <Spinner size={13} />}
+            {creating ? 'Creating…' : 'Create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── ToastContainer ────────────────────────────────────────────────────────────
+
+function ToastContainer({ toasts, onDismiss, isMobile }) {
+  if (toasts.length === 0) return null;
+
+  const bgColor = { success: 'var(--success)', error: 'var(--danger)', info: 'var(--text-primary)' };
+  const icons = { success: '✓', error: '✕', info: 'ℹ' };
+
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: isMobile ? 80 : 24,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      zIndex: 300,
+      pointerEvents: 'none',
+      alignItems: 'center',
+    }}>
+      {toasts.map(toast => (
+        <div
+          key={toast.id}
+          onClick={() => onDismiss(toast.id)}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 16px',
+            borderRadius: 10,
+            background: 'var(--text-primary)',
+            color: 'var(--bg-card)',
+            fontSize: 13.5,
+            fontFamily: 'var(--font-ui)',
+            fontWeight: 500,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.18)',
+            pointerEvents: 'auto',
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+            maxWidth: 'calc(100vw - 48px)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          <span style={{
+            width: 18, height: 18, borderRadius: '50%',
+            background: bgColor[toast.type],
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: '#fff', fontSize: 10, fontWeight: 700, flexShrink: 0,
+          }}>
+            {icons[toast.type]}
+          </span>
+          {toast.message}
+        </div>
+      ))}
     </div>
   );
 }
