@@ -33,6 +33,10 @@ export default function DrivePage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [showSearch, setShowSearch] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null); // file pending delete confirmation
+  const [deleting, setDeleting] = useState(false);
+  const [downloadingId, setDownloadingId] = useState(null);
+  const [storageOverrideBytes, setStorageOverrideBytes] = useState(null); // optimistic local decrement after delete
 
   // Fetch folders
   useEffect(() => {
@@ -76,10 +80,11 @@ export default function DrivePage() {
 
   // Breadcrumb
   function getBreadcrumb() {
+    const folderById = new Map(folders.map(f => [f.id, f]));
     const trail = [];
     let id = currentFolderId;
     while (id) {
-      const folder = folders.find(f => f.id === id);
+      const folder = folderById.get(id);
       if (!folder) break;
       trail.unshift(folder);
       id = folder.parent_id;
@@ -123,6 +128,74 @@ export default function DrivePage() {
     if (!error && data) setFolders(prev => [...prev, data]);
   }
 
+  // ── File actions ─────────────────────────────────────────────────────────
+
+  async function getAuthHeader() {
+    const { data } = await supabase.auth.getSession();
+    return { Authorization: `Bearer ${data?.session?.access_token || ''}` };
+  }
+
+  async function handleDownload(file) {
+    if (downloadingId) return; // ignore if a download is already in flight
+    setDownloadingId(file.id);
+    try {
+      const headers = await getAuthHeader();
+      const res = await fetch('/api/generate-download-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({ fileId: file.id, r2Key: file.r2_key }),
+      });
+      if (!res.ok) throw new Error('Failed to generate download link');
+      const { url } = await res.json();
+
+      // Trigger the browser download via a temporary anchor
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err) {
+      console.error('Download failed:', err);
+      window.alert('Could not download this file. Please try again.');
+    } finally {
+      setDownloadingId(null);
+    }
+  }
+
+  function handleDeleteRequest(file) {
+    setDeleteTarget(file);
+  }
+
+  async function confirmDelete() {
+    const file = deleteTarget;
+    if (!file) return;
+    setDeleting(true);
+    try {
+      const headers = await getAuthHeader();
+      const res = await fetch('/api/delete-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({ fileId: file.id, r2Key: file.r2_key }),
+      });
+      if (!res.ok) throw new Error('Delete failed');
+
+      // Remove from local state — server already deleted the R2 object,
+      // the Supabase row, and decremented user_storage.used_bytes atomically.
+      setFiles(prev => prev.filter(f => f.id !== file.id));
+      setStorageOverrideBytes(prev => {
+        const base = prev != null ? prev : (storage?.used_bytes || 0);
+        return Math.max(0, base - (file.size || 0));
+      });
+      setDeleteTarget(null);
+    } catch (err) {
+      console.error('Delete failed:', err);
+      window.alert('Could not delete this file. Please try again.');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <div style={{ display: 'flex', height: '100vh', background: 'var(--bg-page)', overflow: 'hidden' }}>
 
@@ -135,7 +208,10 @@ export default function DrivePage() {
           onNavChange={(nav) => { setActiveNav(nav); setCurrentFolderId(null); }}
           onFolderClick={(id) => { setActiveNav('drive'); setCurrentFolderId(id); }}
           onNewFolder={handleNewFolder}
-          storage={storage || { used_bytes: 0, storage_limit: 107374182400 }}
+          storage={{
+            ...(storage || { used_bytes: 0, storage_limit: 107374182400 }),
+            used_bytes: storageOverrideBytes != null ? storageOverrideBytes : (storage?.used_bytes || 0),
+          }}
         />
       )}
 
@@ -274,7 +350,14 @@ export default function DrivePage() {
                         <span></span>
                       </div>
                       {visibleFiles.map((file, i) => (
-                        <FileRow key={file.id} file={file} last={i === visibleFiles.length - 1} />
+                        <FileRow
+                          key={file.id}
+                          file={file}
+                          last={i === visibleFiles.length - 1}
+                          onDownload={handleDownload}
+                          onDelete={handleDeleteRequest}
+                          isDownloading={downloadingId === file.id}
+                        />
                       ))}
                     </div>
                   )}
@@ -282,7 +365,13 @@ export default function DrivePage() {
                   {view === 'grid' && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
                       {visibleFiles.map(file => (
-                        <FileCard key={file.id} file={file} />
+                        <FileCard
+                          key={file.id}
+                          file={file}
+                          onDownload={handleDownload}
+                          onDelete={handleDeleteRequest}
+                          isDownloading={downloadingId === file.id}
+                        />
                       ))}
                     </div>
                   )}
@@ -298,6 +387,16 @@ export default function DrivePage() {
         <BottomTabBar
           activeTab={showSearch ? 'search' : activeNav}
           onTabChange={handleTabChange}
+        />
+      )}
+
+      {/* Delete confirmation modal */}
+      {deleteTarget && (
+        <DeleteConfirmModal
+          file={deleteTarget}
+          deleting={deleting}
+          onCancel={() => { if (!deleting) setDeleteTarget(null); }}
+          onConfirm={confirmDelete}
         />
       )}
 
@@ -359,7 +458,7 @@ function FolderCard({ folder, view, onClick }) {
 
 // ── FileRow ───────────────────────────────────────────────────────────────────
 
-function FileRow({ file, last }) {
+function FileRow({ file, last, onDownload, onDelete, isDownloading }) {
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -391,7 +490,11 @@ function FileRow({ file, last }) {
         {new Date(file.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
       </span>
       <div style={{ position: 'relative' }}>
-        {hovered && (
+        {isDownloading ? (
+          <div style={{ width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Spinner size={14} />
+          </div>
+        ) : hovered && (
           <button
             onClick={() => setMenuOpen(o => !o)}
             style={{
@@ -404,7 +507,14 @@ function FileRow({ file, last }) {
             <DotsIcon />
           </button>
         )}
-        {menuOpen && <FileMenu file={file} onClose={() => setMenuOpen(false)} />}
+        {menuOpen && (
+          <FileMenu
+            file={file}
+            onClose={() => setMenuOpen(false)}
+            onDownload={onDownload}
+            onDelete={onDelete}
+          />
+        )}
       </div>
     </div>
   );
@@ -412,7 +522,7 @@ function FileRow({ file, last }) {
 
 // ── FileCard ──────────────────────────────────────────────────────────────────
 
-function FileCard({ file }) {
+function FileCard({ file, onDownload, onDelete, isDownloading }) {
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -434,7 +544,11 @@ function FileCard({ file }) {
         position: 'relative',
       }}
     >
-      {hovered && (
+      {isDownloading ? (
+        <div style={{ position: 'absolute', top: 8, right: 8, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Spinner size={14} />
+        </div>
+      ) : hovered && (
         <button
           onClick={() => setMenuOpen(o => !o)}
           style={{
@@ -447,7 +561,15 @@ function FileCard({ file }) {
           <DotsIcon />
         </button>
       )}
-      {menuOpen && <FileMenu file={file} onClose={() => setMenuOpen(false)} align="left" />}
+      {menuOpen && (
+        <FileMenu
+          file={file}
+          onClose={() => setMenuOpen(false)}
+          align="left"
+          onDownload={onDownload}
+          onDelete={onDelete}
+        />
+      )}
       <FileIcon mime={file.mime_type} size={32} />
       <span style={{ fontSize: 12, color: 'var(--text-primary)', textAlign: 'center', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {file.name}
@@ -461,7 +583,7 @@ function FileCard({ file }) {
 
 // ── FileMenu ──────────────────────────────────────────────────────────────────
 
-function FileMenu({ file, onClose, align = 'right' }) {
+function FileMenu({ file, onClose, align = 'right', onDownload, onDelete }) {
   return (
     <div
       style={{
@@ -478,8 +600,8 @@ function FileMenu({ file, onClose, align = 'right' }) {
       }}
       onClick={e => e.stopPropagation()}
     >
-      <FileMenuItem label="Download" icon="⬇" onClick={() => { alert('Download coming soon'); onClose(); }} />
-      <FileMenuItem label="Delete" icon="🗑" danger onClick={() => { alert('Delete coming soon'); onClose(); }} />
+      <FileMenuItem label="Download" icon="⬇" onClick={() => { onDownload(file); onClose(); }} />
+      <FileMenuItem label="Delete" icon="🗑" danger onClick={() => { onDelete(file); onClose(); }} />
     </div>
   );
 }
@@ -501,6 +623,87 @@ function FileMenuItem({ label, icon, danger, onClick }) {
     >
       <span>{icon}</span>
       {label}
+    </div>
+  );
+}
+
+// ── DeleteConfirmModal ────────────────────────────────────────────────────────
+
+function DeleteConfirmModal({ file, deleting, onCancel, onConfirm }) {
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 100,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 360,
+          maxWidth: 'calc(100vw - 32px)',
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          borderRadius: 12,
+          padding: 20,
+          boxShadow: '0 16px 40px rgba(0,0,0,0.5)',
+        }}
+      >
+        <p style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
+          Delete file?
+        </p>
+        <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+          "{file.name}" will be permanently deleted. This can't be undone.
+        </p>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
+          <button
+            onClick={onCancel}
+            disabled={deleting}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 8,
+              border: '1px solid var(--border)',
+              background: 'transparent',
+              color: 'var(--text-primary)',
+              fontSize: 13,
+              fontFamily: 'var(--font-ui)',
+              cursor: deleting ? 'default' : 'pointer',
+              opacity: deleting ? 0.6 : 1,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={deleting}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 8,
+              border: 'none',
+              background: 'var(--danger)',
+              color: '#fff',
+              fontSize: 13,
+              fontWeight: 600,
+              fontFamily: 'var(--font-ui)',
+              cursor: deleting ? 'default' : 'pointer',
+              opacity: deleting ? 0.7 : 1,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            {deleting && <Spinner size={13} />}
+            {deleting ? 'Deleting…' : 'Delete'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -528,9 +731,9 @@ function EmptyState({ activeNav }) {
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
 
-function Spinner() {
+function Spinner({ size = 24 }) {
   return (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" style={{ animation: 'spin 0.8s linear infinite' }}>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={{ animation: 'spin 0.8s linear infinite' }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       <circle cx="12" cy="12" r="10" stroke="var(--border)" strokeWidth="2.5" />
       <path d="M12 2a10 10 0 0 1 10 10" stroke="var(--brand)" strokeWidth="2.5" strokeLinecap="round" />
