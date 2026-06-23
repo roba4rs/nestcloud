@@ -28,7 +28,7 @@ export default function DrivePage() {
   const isMobile = useIsMobile();
 
   const [activeNav, setActiveNav] = useState('drive');
-  const [view, setView] = useState('list');
+  const [view, setView] = useState('grid');
   const [folders, setFolders] = useState([]);
   const [files, setFiles] = useState([]);
   const [currentFolderId, setCurrentFolderId] = useState(null);
@@ -595,6 +595,7 @@ export default function DrivePage() {
                           onDelete={handleDeleteRequest}
                           isDownloading={downloadingId === file.id}
                           isMobile={isMobile}
+                          getAuthHeader={getAuthHeader}
                         />
                       ))}
                     </div>
@@ -810,10 +811,37 @@ function FileRow({ file, last, onDownload, onDelete, isDownloading, isMobile }) 
 
 // ── FileCard ──────────────────────────────────────────────────────────────────
 
-function FileCard({ file, onDownload, onDelete, isDownloading, isMobile }) {
+function FileCard({ file, onDownload, onDelete, isDownloading, isMobile, getAuthHeader }) {
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [thumbUrl, setThumbUrl] = useState(null);
+  const [thumbError, setThumbError] = useState(false);
   const showButton = isMobile || hovered || menuOpen;
+  const isImage = !!file.mime_type && file.mime_type.startsWith('image/');
+  const showThumb = isImage && thumbUrl && !thumbError;
+
+  // Fetch a presigned preview URL for image files only. Falls back to the
+  // generic file icon silently if this fails (e.g. expired token, network blip).
+  useEffect(() => {
+    if (!isImage) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const headers = await getAuthHeader();
+        const res = await fetch('/api/generate-download-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({ fileId: file.id, r2Key: file.r2_key }),
+        });
+        if (!res.ok) throw new Error('Failed to load preview');
+        const { url } = await res.json();
+        if (!cancelled) setThumbUrl(url);
+      } catch {
+        if (!cancelled) setThumbError(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [file.id, file.r2_key, isImage, getAuthHeader]);
 
   return (
     <div
@@ -823,14 +851,15 @@ function FileCard({ file, onDownload, onDelete, isDownloading, isMobile }) {
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        gap: 8,
-        padding: '16px 12px',
+        gap: showThumb ? 0 : 8,
+        padding: showThumb ? 0 : '16px 12px',
         borderRadius: 12,
         border: `1px solid ${hovered ? 'var(--brand)' : 'var(--border)'}`,
         background: 'var(--bg-card)',
         cursor: 'default',
         transition: 'border-color 0.15s',
         position: 'relative',
+        overflow: 'hidden',
       }}
     >
       {isDownloading ? (
@@ -859,13 +888,33 @@ function FileCard({ file, onDownload, onDelete, isDownloading, isMobile }) {
           onDelete={onDelete}
         />
       )}
-      <FileIcon mime={file.mime_type} size={32} />
-      <span style={{ fontSize: 12, color: 'var(--text-primary)', textAlign: 'center', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {file.name}
-      </span>
-      <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-        {formatBytes(file.size)}
-      </span>
+
+      {showThumb ? (
+        <>
+          <div style={{ width: '100%', aspectRatio: '1 / 1', background: 'var(--bg-page)', overflow: 'hidden' }}>
+            <img
+              src={thumbUrl}
+              alt={file.name}
+              onError={() => setThumbError(true)}
+              style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+            />
+          </div>
+          <span style={{
+            fontSize: 12, color: 'var(--text-primary)', textAlign: 'center', width: '100%',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            padding: '8px 10px 10px',
+          }}>
+            {file.name}
+          </span>
+        </>
+      ) : (
+        <>
+          <FileIcon mime={file.mime_type} size={32} />
+          <span style={{ fontSize: 12, color: 'var(--text-primary)', textAlign: 'center', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {file.name}
+          </span>
+        </>
+      )}
     </div>
   );
 }
