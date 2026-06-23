@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useStorage } from '../hooks/useStorage';
 import { supabase } from '../lib/supabase';
 import Sidebar from '../components/SideBar';
 import TopBar from '../components/TopBar';
 import BottomTabBar from '../components/BottomTabBar';
+
+const UPLOAD_CONCURRENCY = 3;
 
 // ── Mobile hook ───────────────────────────────────────────────────────────────
 
@@ -38,6 +40,8 @@ export default function DrivePage() {
   const [downloadingId, setDownloadingId] = useState(null);
   const [storageOverrideBytes, setStorageOverrideBytes] = useState(null); // optimistic local decrement after delete
   const [meSheetOpen, setMeSheetOpen] = useState(false);
+  const [uploadQueue, setUploadQueue] = useState([]); // [{ id, file, status: 'queued'|'uploading'|'done'|'error', progress, error }]
+  const fileInputRef = useRef(null);
 
   // Fetch folders
   useEffect(() => {
@@ -197,6 +201,145 @@ export default function DrivePage() {
     }
   }
 
+  // ── Upload ───────────────────────────────────────────────────────────────
+
+  function openFilePicker() {
+    fileInputRef.current?.click();
+  }
+
+  function handleFilesSelected(e) {
+    const selected = Array.from(e.target.files || []);
+    e.target.value = ''; // allow re-selecting the same file later
+    if (selected.length === 0) return;
+
+    const currentUsed = storageOverrideBytes != null ? storageOverrideBytes : (storage?.used_bytes || 0);
+    const limit = storage?.storage_limit || 107374182400;
+    const remaining = Math.max(0, limit - currentUsed);
+    const incomingTotal = selected.reduce((sum, f) => sum + f.size, 0);
+
+    // Frontend pre-check: catch the obvious "way too big" case before any
+    // network call. The server re-checks the real, authoritative used_bytes
+    // before issuing a presigned URL — this is just a fast UX shortcut.
+    if (incomingTotal > remaining) {
+      window.alert(
+        `Not enough storage space. You have ${formatBytes(remaining)} left, ` +
+        `but these files total ${formatBytes(incomingTotal)}.`
+      );
+      return;
+    }
+
+    const newEntries = selected.map(file => ({
+      id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      file,
+      status: 'queued',
+      progress: 0,
+      error: null,
+    }));
+
+    setUploadQueue(prev => [...prev, ...newEntries]);
+    processQueue(newEntries);
+  }
+
+  // Runs up to UPLOAD_CONCURRENCY uploads at a time from the given batch.
+  async function processQueue(entries) {
+    let nextIndex = 0;
+
+    async function worker() {
+      while (nextIndex < entries.length) {
+        const entry = entries[nextIndex];
+        nextIndex += 1;
+        await uploadSingleFile(entry);
+      }
+    }
+
+    const workers = Array.from({ length: Math.min(UPLOAD_CONCURRENCY, entries.length) }, worker);
+    await Promise.all(workers);
+  }
+
+  function updateQueueEntry(id, patch) {
+    setUploadQueue(prev => prev.map(e => (e.id === id ? { ...e, ...patch } : e)));
+  }
+
+  async function uploadSingleFile(entry) {
+    updateQueueEntry(entry.id, { status: 'uploading', progress: 0 });
+    try {
+      const headers = await getAuthHeader();
+
+      // TODO: replace with the real call once /api/generate-upload-url exists.
+      // Expected contract: POST { fileName, mimeType, size, folderId } with
+      // the auth header above -> { url, r2Key } (a presigned R2 PUT URL).
+      // The server should re-check storage_limit / used_bytes here too,
+      // since this frontend check can't be trusted as the source of truth.
+      const res = await fetch('/api/generate-upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({
+          fileName: entry.file.name,
+          mimeType: entry.file.type || 'application/octet-stream',
+          size: entry.file.size,
+          folderId: currentFolderId || null,
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to get upload URL');
+      const { url, r2Key } = await res.json();
+
+      await putFileToR2(url, entry.file, (pct) => {
+        updateQueueEntry(entry.id, { progress: pct });
+      });
+
+      // Record the file in Supabase once the R2 upload succeeds.
+      const { data, error } = await supabase
+        .from('files')
+        .insert({
+          user_id: user.id,
+          folder_id: currentFolderId || null,
+          name: entry.file.name,
+          size: entry.file.size,
+          mime_type: entry.file.type || 'application/octet-stream',
+          r2_key: r2Key,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+
+      // Show it immediately if we're looking at the folder it landed in.
+      if (activeNav === 'drive' || activeNav === 'recent') {
+        setFiles(prev => [data, ...prev]);
+      }
+      setStorageOverrideBytes(prev => {
+        const base = prev != null ? prev : (storage?.used_bytes || 0);
+        return base + entry.file.size;
+      });
+
+      updateQueueEntry(entry.id, { status: 'done', progress: 100 });
+    } catch (err) {
+      console.error('Upload failed:', entry.file.name, err);
+      updateQueueEntry(entry.id, { status: 'error', error: err.message || 'Upload failed' });
+    }
+  }
+
+  // PUTs a file to a presigned URL with progress via XHR (fetch can't report upload progress).
+  function putFileToR2(url, file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`Upload failed with status ${xhr.status}`));
+      };
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+      xhr.send(file);
+    });
+  }
+
+  function dismissUploadEntry(id) {
+    setUploadQueue(prev => prev.filter(e => e.id !== id));
+  }
+
   return (
     <div style={{ display: 'flex', height: '100vh', background: 'var(--bg-page)', overflow: 'hidden' }}>
 
@@ -264,28 +407,47 @@ export default function DrivePage() {
 
           {/* Breadcrumb — drive only */}
           {activeNav === 'drive' && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 20, fontSize: 13, color: 'var(--text-muted)' }}>
-              <span
-                style={{ cursor: 'pointer', color: currentFolderId ? 'var(--text-secondary)' : 'var(--text-primary)', fontWeight: currentFolderId ? 400 : 600 }}
-                onClick={() => setCurrentFolderId(null)}
-              >
-                My Drive
-              </span>
-              {breadcrumb.map((folder, i) => (
-                <React.Fragment key={folder.id}>
-                  <span style={{ color: 'var(--border)' }}>/</span>
-                  <span
-                    style={{
-                      cursor: 'pointer',
-                      color: i === breadcrumb.length - 1 ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      fontWeight: i === breadcrumb.length - 1 ? 600 : 400,
-                    }}
-                    onClick={() => setCurrentFolderId(folder.id)}
-                  >
-                    {folder.name}
-                  </span>
-                </React.Fragment>
-              ))}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--text-muted)' }}>
+                <span
+                  style={{ cursor: 'pointer', color: currentFolderId ? 'var(--text-secondary)' : 'var(--text-primary)', fontWeight: currentFolderId ? 400 : 600 }}
+                  onClick={() => setCurrentFolderId(null)}
+                >
+                  My Drive
+                </span>
+                {breadcrumb.map((folder, i) => (
+                  <React.Fragment key={folder.id}>
+                    <span style={{ color: 'var(--border)' }}>/</span>
+                    <span
+                      style={{
+                        cursor: 'pointer',
+                        color: i === breadcrumb.length - 1 ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        fontWeight: i === breadcrumb.length - 1 ? 600 : 400,
+                      }}
+                      onClick={() => setCurrentFolderId(folder.id)}
+                    >
+                      {folder.name}
+                    </span>
+                  </React.Fragment>
+                ))}
+              </div>
+
+              {/* Upload — desktop only; mobile uses the floating "+" button */}
+              {!isMobile && (
+                <button
+                  onClick={openFilePicker}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '7px 14px', borderRadius: 8, border: 'none',
+                    background: 'var(--brand)', color: '#fff',
+                    fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-ui)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <UploadIcon size={15} />
+                  Upload
+                </button>
+              )}
             </div>
           )}
 
@@ -405,6 +567,52 @@ export default function DrivePage() {
           deleting={deleting}
           onCancel={() => { if (!deleting) setDeleteTarget(null); }}
           onConfirm={confirmDelete}
+        />
+      )}
+
+      {/* Hidden file input — shared by desktop Upload button and mobile "+" button */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        onChange={handleFilesSelected}
+        style={{ display: 'none' }}
+      />
+
+      {/* Floating upload button — mobile only */}
+      {isMobile && activeNav === 'drive' && (
+        <button
+          onClick={openFilePicker}
+          aria-label="Upload files"
+          style={{
+            position: 'fixed',
+            right: 20,
+            bottom: 80, // sits above the bottom tab bar
+            width: 54,
+            height: 54,
+            borderRadius: '50%',
+            border: 'none',
+            background: 'var(--brand)',
+            color: '#fff',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 6px 20px rgba(79, 70, 229, 0.45)',
+            cursor: 'pointer',
+            zIndex: 90,
+          }}
+        >
+          <PlusIconLarge size={24} />
+        </button>
+      )}
+
+      {/* Upload progress panel */}
+      {uploadQueue.length > 0 && (
+        <UploadProgressPanel
+          queue={uploadQueue}
+          onDismiss={dismissUploadEntry}
+          onClearDone={() => setUploadQueue(prev => prev.filter(e => e.status !== 'done'))}
+          isMobile={isMobile}
         />
       )}
 
@@ -718,6 +926,107 @@ function DeleteConfirmModal({ file, deleting, onCancel, onConfirm }) {
   );
 }
 
+// ── UploadProgressPanel ────────────────────────────────────────────────────────
+
+function UploadProgressPanel({ queue, onDismiss, onClearDone, isMobile }) {
+  const activeCount = queue.filter(e => e.status === 'uploading' || e.status === 'queued').length;
+  const doneCount = queue.filter(e => e.status === 'done').length;
+  const errorCount = queue.filter(e => e.status === 'error').length;
+
+  return (
+    <div style={{
+      position: 'fixed',
+      right: isMobile ? 12 : 20,
+      left: isMobile ? 12 : 'auto',
+      bottom: isMobile ? 148 : 20, // clears the floating "+" and bottom tab bar on mobile
+      width: isMobile ? 'auto' : 320,
+      maxHeight: 320,
+      background: 'var(--bg-card)',
+      border: '1px solid var(--border)',
+      borderRadius: 12,
+      boxShadow: '0 12px 32px rgba(0,0,0,0.45)',
+      overflow: 'hidden',
+      zIndex: 95,
+      display: 'flex',
+      flexDirection: 'column',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '10px 14px', borderBottom: '1px solid var(--border)',
+      }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+          {activeCount > 0
+            ? `Uploading ${activeCount} file${activeCount > 1 ? 's' : ''}…`
+            : errorCount > 0
+              ? `${doneCount} done, ${errorCount} failed`
+              : `${doneCount} file${doneCount > 1 ? 's' : ''} uploaded`}
+        </span>
+        {activeCount === 0 && (
+          <button
+            onClick={onClearDone}
+            style={{
+              border: 'none', background: 'transparent', color: 'var(--text-muted)',
+              fontSize: 12, cursor: 'pointer', fontFamily: 'var(--font-ui)',
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
+      <div style={{ overflowY: 'auto', flex: 1 }}>
+        {queue.map(entry => (
+          <div key={entry.id} style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '9px 14px', borderBottom: '1px solid var(--border)',
+          }}>
+            <FileIcon mime={entry.file.type} size={16} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{
+                margin: 0, fontSize: 12.5, color: 'var(--text-primary)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {entry.file.name}
+              </p>
+              {entry.status === 'uploading' && (
+                <div style={{ height: 3, background: 'var(--border)', borderRadius: 99, marginTop: 5, overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%', width: `${entry.progress}%`,
+                    background: 'var(--brand)', transition: 'width 0.15s',
+                  }} />
+                </div>
+              )}
+              {entry.status === 'error' && (
+                <p style={{ margin: '2px 0 0', fontSize: 11, color: 'var(--danger)' }}>
+                  {entry.error || 'Upload failed'}
+                </p>
+              )}
+            </div>
+            {entry.status === 'uploading' && (
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>{entry.progress}%</span>
+            )}
+            {entry.status === 'queued' && (
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>Waiting…</span>
+            )}
+            {entry.status === 'done' && <CheckIcon size={15} />}
+            {entry.status === 'error' && (
+              <>
+                <AlertIcon size={15} />
+                <button
+                  onClick={() => onDismiss(entry.id)}
+                  style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', flexShrink: 0 }}
+                >
+                  <CloseIcon size={13} />
+                </button>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── EmptyState ────────────────────────────────────────────────────────────────
 
 function EmptyState({ activeNav }) {
@@ -784,6 +1093,52 @@ function DotsIcon() {
       <circle cx="5" cy="12" r="2" />
       <circle cx="12" cy="12" r="2" />
       <circle cx="19" cy="12" r="2" />
+    </svg>
+  );
+}
+
+function UploadIcon({ size = 15, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" y1="3" x2="12" y2="15" />
+    </svg>
+  );
+}
+
+function PlusIconLarge({ size = 24, color = '#fff' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
+function CheckIcon({ size = 14, color = 'var(--success)' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function AlertIcon({ size = 14, color = 'var(--danger)' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="8" x2="12" y2="13" />
+      <line x1="12" y1="16" x2="12.01" y2="16" />
+    </svg>
+  );
+}
+
+function CloseIcon({ size = 13, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
     </svg>
   );
 }
