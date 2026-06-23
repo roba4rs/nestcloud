@@ -64,9 +64,13 @@ module.exports = async function handler(req, res) {
     }
 
     // 3. Return presigned GET URL (expires in 1 hour)
+    // ResponseContentDisposition forces a file save instead of opening inline in a new tab
+    const fileName = fileRow.r2_key.split("/").pop().replace(/^\d+-/, "");
+
     const command = new GetObjectCommand({
       Bucket: process.env.R2_BUCKET_NAME,
       Key: fileRow.r2_key,
+      ResponseContentDisposition: `attachment; filename="${fileName}"`,
     });
 
     const url = await getSignedUrl(r2, command, { expiresIn: 3600 });
