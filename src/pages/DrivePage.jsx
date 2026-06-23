@@ -308,11 +308,6 @@ export default function DrivePage() {
     try {
       const headers = await getAuthHeader();
 
-      // TODO: replace with the real call once /api/generate-upload-url exists.
-      // Expected contract: POST { fileName, mimeType, size, folderId } with
-      // the auth header above -> { url, r2Key } (a presigned R2 PUT URL).
-      // The server should re-check storage_limit / used_bytes here too,
-      // since this frontend check can't be trusted as the source of truth.
       const res = await fetch('/api/generate-upload-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
@@ -323,31 +318,69 @@ export default function DrivePage() {
           folderId: currentFolderId || null,
         }),
       });
-      if (!res.ok) throw new Error('Failed to get upload URL');
-      const { url, r2Key } = await res.json();
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'Failed to get upload URL');
+      }
+      const payload = await res.json();
 
-      await putFileToR2(url, entry.file, (pct) => {
-        updateQueueEntry(entry.id, { progress: pct });
-      });
+      let fileRow;
 
-      // Record the file in Supabase once the R2 upload succeeds.
-      const { data, error } = await supabase
-        .from('files')
-        .insert({
-          user_id: user.id,
-          folder_id: currentFolderId || null,
-          name: entry.file.name,
-          size: entry.file.size,
-          mime_type: entry.file.type || 'application/octet-stream',
-          r2_key: r2Key,
-        })
-        .select()
-        .single();
-      if (error) throw error;
+      if (payload.url) {
+        // ── Single-part path (<100 MB) ──────────────────────────────────────
+        await putPartToR2(payload.url, entry.file, entry.file.type || 'application/octet-stream', (pct) => {
+          updateQueueEntry(entry.id, { progress: pct });
+        });
 
-      // Show it immediately if we're looking at the folder it landed in.
+        // Record the file in Supabase
+        const { data, error } = await supabase
+          .from('files')
+          .insert({
+            user_id: user.id,
+            folder_id: currentFolderId || null,
+            name: entry.file.name,
+            size: entry.file.size,
+            mime_type: entry.file.type || 'application/octet-stream',
+            r2_key: payload.r2Key,
+          })
+          .select()
+          .single();
+        if (error) throw error;
+        fileRow = data;
+
+      } else {
+        // ── Multipart path (≥100 MB) ────────────────────────────────────────
+        const { uploadId, r2Key, parts } = payload;
+        const completedParts = await uploadMultipart(entry, parts, (pct) => {
+          updateQueueEntry(entry.id, { progress: pct });
+        });
+
+        // Ask the server to complete the upload and write the DB row
+        const completeHeaders = await getAuthHeader();
+        const completeRes = await fetch('/api/complete-multipart-upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...completeHeaders },
+          body: JSON.stringify({
+            r2Key,
+            uploadId,
+            parts: completedParts,
+            fileName: entry.file.name,
+            mimeType: entry.file.type || 'application/octet-stream',
+            size: entry.file.size,
+            folderId: currentFolderId || null,
+          }),
+        });
+        if (!completeRes.ok) {
+          const body = await completeRes.json().catch(() => ({}));
+          throw new Error(body.error || 'Failed to complete upload');
+        }
+        const { file: completedFile } = await completeRes.json();
+        fileRow = completedFile;
+      }
+
+      // Show the new file immediately in the current view
       if (activeNav === 'drive' || activeNav === 'recent') {
-        setFiles(prev => [data, ...prev]);
+        setFiles(prev => [fileRow, ...prev]);
       }
       setStorageOverrideBytes(prev => {
         const base = prev != null ? prev : (storage?.used_bytes || 0);
@@ -361,21 +394,53 @@ export default function DrivePage() {
     }
   }
 
-  // PUTs a file to a presigned URL with progress via XHR (fetch can't report upload progress).
-  function putFileToR2(url, file, onProgress) {
+  // Uploads all parts sequentially, collecting ETags. Returns the completed-parts
+  // array needed by complete-multipart-upload.
+  async function uploadMultipart(entry, parts, onProgress) {
+    const completedParts = [];
+    const mimeType = entry.file.type || 'application/octet-stream';
+    const PART_SIZE = 10 * 1024 * 1024;
+
+    for (let i = 0; i < parts.length; i++) {
+      const { partNumber, url } = parts[i];
+      const start = (partNumber - 1) * PART_SIZE;
+      const end = Math.min(start + PART_SIZE, entry.file.size);
+      const chunk = entry.file.slice(start, end);
+
+      const etag = await putPartToR2(url, chunk, mimeType, (partPct) => {
+        // Overall progress = parts done + fraction of current part
+        const overall = Math.round(((i + partPct / 100) / parts.length) * 100);
+        onProgress(overall);
+      });
+
+      completedParts.push({ partNumber, etag });
+    }
+
+    return completedParts;
+  }
+
+  // PUTs a single chunk/file to a presigned URL via XHR (fetch can't report
+  // upload progress). Returns the ETag from the response headers, which R2
+  // requires to complete a multipart upload.
+  function putPartToR2(url, data, contentType, onProgress) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('PUT', url);
-      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.setRequestHeader('Content-Type', contentType);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
       };
       xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) resolve();
-        else reject(new Error(`Upload failed with status ${xhr.status}`));
+        if (xhr.status >= 200 && xhr.status < 300) {
+          // R2 returns ETag in the response header for each part
+          const etag = xhr.getResponseHeader('ETag') || '';
+          resolve(etag);
+        } else {
+          reject(new Error(`Upload failed with status ${xhr.status}`));
+        }
       };
       xhr.onerror = () => reject(new Error('Network error during upload'));
-      xhr.send(file);
+      xhr.send(data);
     });
   }
 

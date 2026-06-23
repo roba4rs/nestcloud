@@ -1,4 +1,9 @@
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const {
+  S3Client,
+  PutObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+} = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -16,7 +21,8 @@ const r2 = new S3Client({
   },
 });
 
-const MULTIPART_THRESHOLD = 100 * 1024 * 1024; // 100MB
+const MULTIPART_THRESHOLD = 100 * 1024 * 1024; // 100 MB
+const PART_SIZE = 10 * 1024 * 1024;            // 10 MB per part
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
@@ -46,7 +52,7 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: "fileName and size are required" });
     }
 
-    // 2. Re-check storage_limit vs used_bytes server-side (not authoritative on frontend)
+    // 2. Re-check storage_limit vs used_bytes server-side
     const { data: storageRow, error: storageError } = await supabase
       .from("user_storage")
       .select("used_bytes, storage_limit, plan_active")
@@ -67,13 +73,14 @@ module.exports = async function handler(req, res) {
 
     // 3. Generate a unique r2Key
     const r2Key = `${userId}/${Date.now()}-${fileName}`;
+    const contentType = mimeType || "application/octet-stream";
 
-    // 4. Files under 100MB: single presigned PUT URL
+    // 4. Files under 100 MB: single presigned PUT URL (existing flow unchanged)
     if (size < MULTIPART_THRESHOLD) {
       const command = new PutObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME,
         Key: r2Key,
-        ContentType: mimeType || "application/octet-stream",
+        ContentType: contentType,
       });
 
       const url = await getSignedUrl(r2, command, { expiresIn: 3600 });
@@ -81,10 +88,38 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ url, r2Key });
     }
 
-    // 5. Files 100MB+: multipart upload initiation — NOT YET IMPLEMENTED (step 6)
-    return res.status(501).json({
-      error: "Multipart upload not yet implemented for files 100MB+",
-    });
+    // 5. Files 100 MB+: initiate multipart upload and return presigned part URLs
+    const createRes = await r2.send(
+      new CreateMultipartUploadCommand({
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: r2Key,
+        ContentType: contentType,
+      })
+    );
+
+    const uploadId = createRes.UploadId;
+    const totalParts = Math.ceil(size / PART_SIZE);
+
+    // Generate a presigned URL for each part (1-indexed, as S3/R2 requires)
+    const partUrlPromises = [];
+    for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+      const command = new UploadPartCommand({
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: r2Key,
+        UploadId: uploadId,
+        PartNumber: partNumber,
+      });
+      partUrlPromises.push(
+        getSignedUrl(r2, command, { expiresIn: 3600 }).then((url) => ({
+          partNumber,
+          url,
+        }))
+      );
+    }
+
+    const parts = await Promise.all(partUrlPromises);
+
+    return res.status(200).json({ uploadId, r2Key, parts });
   } catch (err) {
     console.error("generate-upload-url error:", err);
     return res.status(500).json({ error: "Internal server error" });
