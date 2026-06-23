@@ -365,8 +365,6 @@ export default function DrivePage() {
         {/* TopBar */}
         <TopBar
           user={user}
-          view={view}
-          onViewChange={setView}
           onSearch={setSearchQuery}
           isMobile={isMobile}
           onOpenMeMenu={() => setMeSheetOpen(true)}
@@ -405,55 +403,93 @@ export default function DrivePage() {
             />
           )}
 
-          {/* Breadcrumb — drive only */}
-          {activeNav === 'drive' && (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--text-muted)' }}>
-                <span
-                  style={{ cursor: 'pointer', color: currentFolderId ? 'var(--text-secondary)' : 'var(--text-primary)', fontWeight: currentFolderId ? 400 : 600 }}
-                  onClick={() => setCurrentFolderId(null)}
-                >
-                  My Drive
-                </span>
-                {breadcrumb.map((folder, i) => (
-                  <React.Fragment key={folder.id}>
-                    <span style={{ color: 'var(--border)' }}>/</span>
-                    <span
-                      style={{
-                        cursor: 'pointer',
-                        color: i === breadcrumb.length - 1 ? 'var(--text-primary)' : 'var(--text-secondary)',
-                        fontWeight: i === breadcrumb.length - 1 ? 600 : 400,
-                      }}
-                      onClick={() => setCurrentFolderId(folder.id)}
-                    >
-                      {folder.name}
-                    </span>
-                  </React.Fragment>
-                ))}
-              </div>
-
-              {/* Upload — desktop only; mobile uses the floating "+" button */}
-              {!isMobile && (
-                <button
-                  onClick={openFilePicker}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    padding: '7px 14px', borderRadius: 8, border: 'none',
-                    background: 'var(--brand)', color: '#fff',
-                    fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-ui)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <UploadIcon size={15} />
-                  Upload
-                </button>
+          {/* Toolbar row — breadcrumb (drive only) + view toggle + upload */}
+          {(activeNav === 'drive' || activeNav === 'recent') && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: activeNav === 'drive' ? 20 : 16 }}>
+              {activeNav === 'drive' ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--text-muted)' }}>
+                  <span
+                    style={{ cursor: 'pointer', color: currentFolderId ? 'var(--text-secondary)' : 'var(--text-primary)', fontWeight: currentFolderId ? 400 : 600 }}
+                    onClick={() => setCurrentFolderId(null)}
+                  >
+                    My Drive
+                  </span>
+                  {breadcrumb.map((folder, i) => (
+                    <React.Fragment key={folder.id}>
+                      <span style={{ color: 'var(--border)' }}>/</span>
+                      <span
+                        style={{
+                          cursor: 'pointer',
+                          color: i === breadcrumb.length - 1 ? 'var(--text-primary)' : 'var(--text-secondary)',
+                          fontWeight: i === breadcrumb.length - 1 ? 600 : 400,
+                        }}
+                        onClick={() => setCurrentFolderId(folder.id)}
+                      >
+                        {folder.name}
+                      </span>
+                    </React.Fragment>
+                  ))}
+                </div>
+              ) : (
+                <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Recent</p>
               )}
-            </div>
-          )}
 
-          {/* Recent label */}
-          {activeNav === 'recent' && (
-            <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 16, marginTop: 0 }}>Recent</p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {/* View toggle — grid/list */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 2,
+                  background: 'var(--bg-input)',
+                  borderRadius: 8,
+                  padding: 3,
+                  border: '1px solid var(--border)',
+                }}>
+                  {[
+                    { key: 'grid', Icon: GridIcon },
+                    { key: 'list', Icon: ListIcon },
+                  ].map(({ key, Icon }) => (
+                    <button
+                      key={key}
+                      onClick={() => setView(key)}
+                      aria-label={`${key} view`}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: 30,
+                        height: 30,
+                        borderRadius: 6,
+                        border: 'none',
+                        cursor: 'pointer',
+                        background: view === key ? 'var(--brand)' : 'transparent',
+                        color: view === key ? '#fff' : 'var(--text-muted)',
+                        transition: 'background 0.15s, color 0.15s',
+                      }}
+                    >
+                      <Icon size={15} color={view === key ? '#fff' : 'var(--text-muted)'} />
+                    </button>
+                  ))}
+                </div>
+
+                {/* Upload — desktop only; mobile uses the floating "+" button. Drive view only. */}
+                {!isMobile && activeNav === 'drive' && (
+                  <button
+                    onClick={openFilePicker}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      padding: '7px 14px', borderRadius: 8, border: 'none',
+                      background: 'var(--brand)', color: '#fff',
+                      fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-ui)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <UploadIcon size={15} />
+                    Upload
+                  </button>
+                )}
+              </div>
+            </div>
           )}
 
           {/* Content */}
@@ -1093,6 +1129,30 @@ function DotsIcon() {
       <circle cx="5" cy="12" r="2" />
       <circle cx="12" cy="12" r="2" />
       <circle cx="19" cy="12" r="2" />
+    </svg>
+  );
+}
+
+function GridIcon({ size = 16, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="7" height="7" />
+      <rect x="14" y="3" width="7" height="7" />
+      <rect x="3" y="14" width="7" height="7" />
+      <rect x="14" y="14" width="7" height="7" />
+    </svg>
+  );
+}
+
+function ListIcon({ size = 16, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="8" y1="6" x2="21" y2="6" />
+      <line x1="8" y1="12" x2="21" y2="12" />
+      <line x1="8" y1="18" x2="21" y2="18" />
+      <line x1="3" y1="6" x2="3.01" y2="6" />
+      <line x1="3" y1="12" x2="3.01" y2="12" />
+      <line x1="3" y1="18" x2="3.01" y2="18" />
     </svg>
   );
 }

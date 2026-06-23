@@ -12,30 +12,6 @@ function SearchIcon({ size = 16, color = 'currentColor' }) {
   );
 }
 
-function GridIcon({ size = 16, color = 'currentColor' }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="7" height="7" />
-      <rect x="14" y="3" width="7" height="7" />
-      <rect x="3" y="14" width="7" height="7" />
-      <rect x="14" y="14" width="7" height="7" />
-    </svg>
-  );
-}
-
-function ListIcon({ size = 16, color = 'currentColor' }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="8" y1="6" x2="21" y2="6" />
-      <line x1="8" y1="12" x2="21" y2="12" />
-      <line x1="8" y1="18" x2="21" y2="18" />
-      <line x1="3" y1="6" x2="3.01" y2="6" />
-      <line x1="3" y1="12" x2="3.01" y2="12" />
-      <line x1="3" y1="18" x2="3.01" y2="18" />
-    </svg>
-  );
-}
-
 function LogOutIcon({ size = 15, color = 'currentColor' }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -48,7 +24,7 @@ function LogOutIcon({ size = 15, color = 'currentColor' }) {
 
 // ── TopBar ────────────────────────────────────────────────────────────────────
 
-export default function TopBar({ user, view = 'list', onViewChange, onSearch, isMobile = false, onOpenMeMenu }) {
+export default function TopBar({ user, onSearch, isMobile = false, onOpenMeMenu }) {
   const [query, setQuery] = useState('');
   const [avatarError, setAvatarError] = useState(false);
 
@@ -110,42 +86,6 @@ export default function TopBar({ user, view = 'list', onViewChange, onSearch, is
 
       {/* Spacer */}
       <div style={{ flex: 1 }} />
-
-      {/* View toggle */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 2,
-        background: 'var(--bg-input)',
-        borderRadius: 8,
-        padding: 3,
-        border: '1px solid var(--border)',
-      }}>
-        {[
-          { key: 'grid', Icon: GridIcon },
-          { key: 'list', Icon: ListIcon },
-        ].map(({ key, Icon }) => (
-          <button
-            key={key}
-            onClick={() => onViewChange?.(key)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: 30,
-              height: 30,
-              borderRadius: 6,
-              border: 'none',
-              cursor: 'pointer',
-              background: view === key ? 'var(--brand)' : 'transparent',
-              color: view === key ? '#fff' : 'var(--text-muted)',
-              transition: 'background 0.15s, color 0.15s',
-            }}
-          >
-            <Icon size={15} color={view === key ? '#fff' : 'var(--text-muted)'} />
-          </button>
-        ))}
-      </div>
 
       {/* Avatar */}
       <div
